@@ -12,12 +12,11 @@ import warnings
 
 # ML/AI libraries
 import whisper
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
-from langchain.retrievers.multi_query import MultiQueryRetriever
-from langchain_core.prompts import PromptTemplate
 from langchain_groq import ChatGroq
+from langchain.retrievers.multi_query import MultiQueryRetriever
 from dotenv import load_dotenv
 
 # Configuration
@@ -33,6 +32,7 @@ class SymptomAnalyzer:
     """Core class for medical symptom analysis and RAG functionality"""
 
     def __init__(self):
+        self.groq_model_name = "meta-llama/llama-4-scout-17b-16e-instruct"
         self.embedding_model = None
         self.medical_vector_store = None
         self.symptom_vector_store = None
@@ -73,7 +73,7 @@ class SymptomAnalyzer:
         try:
             logger.info("Loading embedding model...")
             self.embedding_model = HuggingFaceEmbeddings(
-                model_name="all-MiniLM-L6-v2"
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
             logger.info("Embedding model loaded successfully")
         except Exception as e:
@@ -114,47 +114,36 @@ class SymptomAnalyzer:
             raise
 
     def _initialize_llm(self):
-        """Initialize the Groq LLM"""
+        """Initialize the HuggingFace LLM"""
         try:
-            groq_api_key = os.getenv("GROQ_API_KEY")
-            if not groq_api_key:
-                raise ValueError("GROQ_API_KEY not found in environment variables")
+            api_key = os.getenv("GROQ_API_KEY")
+            if not api_key:
+                raise ValueError("Missing GROQ_API_KEY in .env")
 
-            logger.info("Initializing Groq LLM...")
+            logger.info("Connecting to Groq LLM...")
             self.llm = ChatGroq(
-                model_name="meta-llama/llama-4-scout-17b-16e-instruct",
-                api_key=groq_api_key,
+                groq_api_key=api_key,
+                model_name=self.groq_model_name,
                 temperature=0.3,
+                max_tokens=1024,
             )
 
             # Initialize QA chain - prioritize symptom database, fallback to medical database
             primary_db = self.symptom_vector_store or self.medical_vector_store
             if primary_db:
-                # Create custom prompt for medical queries
-                custom_prompt = self._create_medical_qa_prompt()
-
-                # Use MultiQueryRetriever for better results
-                try:
-                    retriever = MultiQueryRetriever.from_llm(
-                        retriever=primary_db.as_retriever(
-                            search_type="similarity",
-                            search_kwargs={"k": 3}
-                        ),
-                        llm=self.llm,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to create MultiQueryRetriever: {e}, using basic retriever")
-                    retriever = primary_db.as_retriever(
+                retriever = MultiQueryRetriever.from_llm(
+                    retriever=primary_db.as_retriever(
                         search_type="similarity",
                         search_kwargs={"k": 3}
-                    )
+                    ),
+                    llm=self.llm,
+                )
 
                 self.qa_chain = RetrievalQA.from_chain_type(
                     llm=self.llm,
                     retriever=retriever,
                     chain_type="stuff",
-                    return_source_documents=True,
-                    chain_type_kwargs={'prompt': custom_prompt}
+                    return_source_documents=True
                 )
 
             db_type = "symptom" if self.symptom_vector_store else "medical" if self.medical_vector_store else "none"
@@ -164,26 +153,11 @@ class SymptomAnalyzer:
             logger.error(f"Failed to initialize LLM: {e}")
             raise
 
-    def _create_medical_qa_prompt(self):
-        """Create custom prompt template for medical queries"""
-        template = """
-        You are a medical AI assistant. Use the context below to answer medical questions accurately.
-        Only answer based on the context provided. If you don't know the answer based on the context, say so.
-        Always recommend consulting healthcare professionals for medical advice.
-
-        Context: {context}
-
-        Question: {question}
-
-        Answer:
-        """
-        return PromptTemplate(template=template, input_variables=["context", "question"])
-
     def is_initialized(self) -> bool:
         """Check if the analyzer is properly initialized"""
         return self._initialized
 
-    def _load_whisper_model(self, model_name: str = "medium"):
+    def _load_whisper_model(self, model_name: str = "large"):
         """Load Whisper model on demand"""
         if self.whisper_model is None:
             logger.info(f"Loading Whisper model ({model_name})...")
@@ -279,55 +253,55 @@ class SymptomAnalyzer:
     def _create_newborn_analysis_prompt(self, transcript: str) -> str:
         """Create structured prompt for newborn symptom analysis"""
         return f"""
-You are a intelligent clinical assistant assessing baby (newborn) based on a caregiver's spoken description. Analyze the transcription carefully and provide a detailed, structured response. This age group is highly vulnerable — treat any concerning symptom with the highest caution. Analyze the transcript and extract the following details clearly and precisely.
+    You are a intelligent clinical assistant assessing baby (newborn) based on a caregiver's spoken description. Analyze the transcription carefully and provide a detailed, structured response. This age group is highly vulnerable — treat any concerning symptom with the highest caution. Analyze the transcript and extract the following details clearly and precisely.
 
-\"\"\"{transcript}\"\"\"
+    \"\"\"{transcript}\"\"\"
 
-Your task is to extract and report the following information in a structured format:
+    Your task is to extract and report the following information in a structured format:
 
-1. 🤒 Symptom Details:
-    - For each symptom, list:
-        - Symptom name (e.g., cough)
-        - Include: duration, severity, frequency, and patterns (e.g., "not feeding for 12 hours", "one-time vomiting", "sleepy for 1 day").
-        - Estimate approximate duration if temporal clues like "started today" or "since yesterday" appear.
-2. 🩺 *Recommended Medical Specialty*: Suggest the most appropriate type of specialist (e.g., cardiologist, ENT, general physician).
-3. 🚨 *Urgency Level*:
-    - Categorize the urgency of the condition:
-        - Emergency (needs help now)
-        - Urgent (within 24–48 hours)
-        - Non-urgent but important
-        - Routine check-up
-        - ⚠ If the baby shows danger signs (lethargy, poor feeding, low urine output, cold to touch, abnormal breathing), label this as *Emergency*, not anything else.
-4.  🏠 *Recommended Home Remedies*:
-        Suggest simple, safe, and evidence-informed home care measures (e.g., hydration, warm compress, turmeric milk, saltwater gargle).
-        Highlight safety notes (e.g., "Avoid if allergic to…" or "Do not exceed recommended use").
-        Mention what to *avoid* doing or consuming during recovery (e.g., caffeine, alcohol, heavy meals, painkillers without advice). 
-5. 💊 *Evidence-Based Supportive Care (If Appropriate)*:
-    - Include treatments recommended by WHO/IMCI or pediatric manuals, such as:
-        - "Treat the child to prevent low blood sugar" (offer breastfeeding, sugar water)
-        - "Give paracetamol for high fever or pain"
-        - "Apply tetracycline eye ointment if there is eye discharge"
-        - "Give an oral antimalarial if malaria is suspected"
-        - "Always note: **"Only if applicable and under medical supervision."
-        - "Mention possible care actions known from neonatal protocols (e.g., Kangaroo care, hydration, warmth).
-        - " Do *not* recommend medications unless standard for neonates."**        
-6. 💡 *Advice & Next Steps*: 
-            - Give a clear, confident recommendation for what to do now.
-            - If urgent, emphasize immediate travel to a clinic or hospital.
-7. 🚑 *First-Aid Recommendations* (if urgent): Mention emergency steps to take (e.g., warming the baby, keeping airway clear) *until medical help is available*.
-8. 🧬 *Possible Causes of the Condition*:
-            - Based on the symptoms and context, list likely underlying causes (e.g., infection, allergy, lifestyle factors, exposure, environmental conditions, nutritional deficiency, etc.).
-            - Mention if there could be multiple causes or if further testing is needed to identify the exact one.
-            - List *suspected causes*, using safe language like "may suggest", "could be"
-            - Base suggestions on standard neonatal conditions (e.g., sepsis, hypothermia, dehydration, hypoglycemia).
-            - Answer all the possible causes , no matter how many there are.
-9. 💬 *Friendly Summary to the Patient*: One or two-line response directly to the patient.Be firm but supportive. Make it warm, easy to understand, emotionally attached and supportive.
+    1. 🤒 Symptom Details:
+        - For each symptom, list:
+            - Symptom name (e.g., cough)
+            - Include: duration, severity, frequency, and patterns (e.g., "not feeding for 12 hours", "one-time vomiting", "sleepy for 1 day").
+            - Estimate approximate duration if temporal clues like “started today” or “since yesterday” appear.
+    2. 🩺 *Recommended Medical Specialty*: Suggest the most appropriate type of specialist (e.g., cardiologist, ENT, general physician).
+    3. 🚨 *Urgency Level*:
+        - Categorize the urgency of the condition:
+            - Emergency (needs help now)
+            - Urgent (within 24–48 hours)
+            - Non-urgent but important
+            - Routine check-up
+            - ⚠ If the baby shows danger signs (lethargy, poor feeding, low urine output, cold to touch, abnormal breathing), label this as *Emergency*, not anything else.
+    4.  🏠 *Recommended Home Remedies*:
+            Suggest simple, safe, and evidence-informed home care measures (e.g., hydration, warm compress, turmeric milk, saltwater gargle).
+            Highlight safety notes (e.g., “Avoid if allergic to…” or “Do not exceed recommended use”).
+            Mention what to *avoid* doing or consuming during recovery (e.g., caffeine, alcohol, heavy meals, painkillers without advice). 
+    5. 💊 *Evidence-Based Supportive Care (If Appropriate)*:
+        - Include treatments recommended by WHO/IMCI or pediatric manuals, such as:
+            - “Treat the child to prevent low blood sugar” (offer breastfeeding, sugar water)
+            - “Give paracetamol for high fever or pain”
+            - “Apply tetracycline eye ointment if there is eye discharge”
+            - “Give an oral antimalarial if malaria is suspected”
+            - “Always note: **“Only if applicable and under medical supervision.”
+            - “Mention possible care actions known from neonatal protocols (e.g., Kangaroo care, hydration, warmth).
+            - “ Do *not* recommend medications unless standard for neonates.”**        
+    6. 💡 *Advice & Next Steps*: 
+                - Give a clear, confident recommendation for what to do now.
+                - If urgent, emphasize immediate travel to a clinic or hospital.
+    7. 🚑 *First-Aid Recommendations* (if urgent): Mention emergency steps to take (e.g., warming the baby, keeping airway clear) *until medical help is available*.
+    8. 🧬 *Possible Causes of the Condition*:
+                - Based on the symptoms and context, list likely underlying causes (e.g., infection, allergy, lifestyle factors, exposure, environmental conditions, nutritional deficiency, etc.).
+                - Mention if there could be multiple causes or if further testing is needed to identify the exact one.
+                - List *suspected causes*, using safe language like “may suggest”, “could be”
+                - Base suggestions on standard neonatal conditions (e.g., sepsis, hypothermia, dehydration, hypoglycemia).
+                - Answer all the possible causes , no matter how many there are.
+    9. 💬 *Friendly Summary to the Patient*: One or two-line response directly to the patient.Be firm but supportive. Make it warm, easy to understand, emotionally attached and supportive.
 
-Important:
-- Be medically cautious: avoid diagnosis, focus on triage and routing.
-- If any section has no info, write "Not specified."
-- Keep it structured, clear, and avoid jargon unless well-explained.
-"""
+    Important:
+    - Be medically cautious: avoid diagnosis, focus on triage and routing.
+    - If any section has no info, write “Not specified.”
+    - Keep it structured, clear, and avoid jargon unless well-explained.
+    """
 
     def _create_general_analysis_prompt(self, transcript: str, age_group: str) -> str:
         """Create structured prompt for general symptom analysis"""
@@ -492,16 +466,10 @@ Response:"""
     async def _direct_llm_query(self, prompt: str) -> str:
         """Internal method for direct LLM queries"""
         try:
-            # Since ChatGroq might not be fully async, run in executor
+            # Since HuggingFaceEndpoint might not be async, run in executor
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, self.llm.invoke, prompt)
-
-            # Extract content from ChatGroq response
-            if hasattr(response, 'content'):
-                return response.content
-            else:
-                return str(response)
-
+            return response
         except Exception as e:
             logger.error(f"LLM invocation failed: {e}")
             raise
