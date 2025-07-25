@@ -1,30 +1,16 @@
-import os
-import json
-import os
-import re
 import uuid
 from datetime import datetime
-from typing import Dict, Any
-from typing import Optional
+from typing import Optional, Dict, Any
 
-import google.generativeai as genai
-from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from FastAPI.auth.mod.Config import collection
-from FastAPI.auth.mod.JWTToken import create_access_token
-from FastAPI.auth.mod.models import (
-    User, Token, UserResponse, TokenData, MealCreate, Meal, DayMeal, MealComposition, BabyCreate, UserCreateWithBaby,
-    RecommendationResponse, ErrorResponse
+from auth.mod.Config import collection
+from auth.mod.JWTToken import create_access_token
+from auth.mod.models import (
+    User, Token, UserResponse, TokenData, MealCreate, Meal, DayMeal, MealComposition, BabyCreate, UserCreateWithBaby
 )
-from FastAPI.auth.mod.oauth import bcrypt, verify_password, get_current_user
-
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
-
+from auth.mod.oauth import bcrypt, verify_password, get_current_user
 
 # Create router for authentication
 auth_router = APIRouter()
@@ -168,72 +154,13 @@ def read_users_me(current_user: TokenData = Depends(get_current_user)):
         baby=user.get("baby")
     )
 
-
-def _get_composition(meal_name: str) -> MealComposition:
-
-    # Create a detailed prompt for consistent responses
-    prompt = f"""
-    Analyze the meal "{meal_name}" and provide the macronutrient composition as percentages that sum to 1.0.
-
-    Consider typical ingredients and preparation methods for this meal.
-
-    Respond with ONLY a JSON object in this exact format:
-    {{
-        "carbs": 0.XX,
-        "proteins": 0.XX,
-        "fats": 0.XX
-    }}
-
-    Where each value is a decimal between 0 and 1, and all three values sum to 1.0.
-
-    Examples:
-    - A pasta dish might be: {{"carbs": 0.6, "proteins": 0.2, "fats": 0.2}}
-    - A steak dinner might be: {{"carbs": 0.1, "proteins": 0.6, "fats": 0.3}}
-    - A salad might be: {{"carbs": 0.3, "proteins": 0.3, "fats": 0.4}}
-    """
-
-    try:
-        # Generate response
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
-
-        # Extract JSON from response
-        json_match = re.search(r'\{[^}]+}', response_text)
-        if json_match:
-            json_str = json_match.group()
-            composition_data = json.loads(json_str)
-
-            # Validate the data
-            carbs = float(composition_data.get('carbs', 0))
-            proteins = float(composition_data.get('proteins', 0))
-            fats = float(composition_data.get('fats', 0))
-
-            # Normalize to ensure they sum to 1.0
-            total = carbs + proteins + fats
-            if total > 0:
-                carbs /= total
-                proteins /= total
-                fats /= total
-            else:
-                # Fallback values if something goes wrong
-                carbs, proteins, fats = 0.4, 0.3, 0.3
-
-            return MealComposition(
-                carbs=round(carbs, 2),
-                proteins=round(proteins, 2),
-                fats=round(fats, 2)
-            )
-        else:
-            raise ValueError("Could not extract JSON from response")
-
-    except Exception as e:
-        print(f"Error getting composition for {meal_name}: {e}")
-        # Return reasonable default values
-        return MealComposition(
-            carbs=0.4,
-            proteins=0.3,
-            fats=0.3
-        )
+def _get_composition(meal_name: str):
+    comp = MealComposition(
+        carbs=0.6,
+        proteins=0.2,
+        fats=0.2,
+    )
+    return comp
 
 
 
@@ -442,110 +369,5 @@ def create_baby(
         )
 
 
-@auth_router.get("/ai_meal_guide", response_model=RecommendationResponse,
-         responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
-async def get_recommendations(current_user: TokenData = Depends(get_current_user)):
-
-    average_data = get_meal_composition_avg(current_user)
-
-    # 3. Prepare prompt for RAG model
-    prompt = f"""
-    User's average nutrition intake:
-    - Carbohydrates: {average_data.carbs}
-    - Protein: {average_data.proteins}
-    - Fats: {average_data.fats}
-
-    Based on this data:
-    1. Identify any significant deficiencies or imbalances
-    2. Suggest specific foods to address these
-    3. Provide meal recommendations
-    4. Explain the benefits of these suggestions
-
-    Return the response in valid JSON format with these exact keys:
-    {{
-        "analysis": "text analysis of deficiencies",
-        "recommendations": {{
-            "foods": ["list", "of", "specific", "foods"],
-            "meals": ["specific", "meal", "suggestions"],
-            "rationale": "explanation of why these help"
-        }}
-    }}
-    Only return the JSON object, nothing else.
-    """
-
-    # 4. Query Gemini model
-    try:
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
-
-        # Clean the response
-        if response_text.startswith('```json'):
-            response_text = response_text[7:-3].strip()
-        elif response_text.startswith('```'):
-            response_text = response_text[3:-3].strip()
-
-        # Parse the JSON
-        recommendations = json.loads(response_text)
-
-        # Validate the response structure
-        if not all(key in recommendations for key in ["analysis", "recommendations"]):
-            raise ValueError("Invalid response format from model")
-
-        if not all(key in recommendations["recommendations"] for key in ["foods", "meals", "rationale"]):
-            raise ValueError("Invalid recommendations format")
-
-        return {
-            "status": "success",
-            "analysis": recommendations["analysis"],
-            "recommendations": recommendations["recommendations"]
-        }
-
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "status": "error",
-                "msg": "Failed to parse model response",
-                "error": str(e),
-                "raw_response": response_text if 'response_text' in locals() else None
-            }
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "status": "error",
-                "msg": "Failed to generate recommendations",
-                "error": str(e)
-            }
-        )
 
 
-@auth_router.get("/analyze/{meal_name}", response_model=MealComposition)
-def analyze_meal_composition(meal_name: str):
-    """
-    Analyze the macronutrient composition of a meal using Google Gemini AI.
-
-    Returns the carbohydrate, protein, and fat ratios that sum to 1.0.
-    """
-    try:
-        meal_name = meal_name.strip()
-
-        if not meal_name or len(meal_name) > 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Meal name must be between 1 and 200 characters"
-            )
-
-        composition = _get_composition(meal_name)
-
-        return composition
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error while analyzing meal composition: {str(e)}"
-        )

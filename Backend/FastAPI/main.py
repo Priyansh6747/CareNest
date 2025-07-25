@@ -5,11 +5,10 @@ from dotenv import load_dotenv
 
 # Import routers
 from routes.query import router as medical_router
-from routes.symptom.symptom import router as symptom_router
+#from routes.symptom import router as symptom_router
 from routes.generate_meal_plan.core import meal_router as meal_generator
 from routes.Location.location import locRouter as locationRouter
-from FastAPI.auth.route import auth_router
-from routes.MythBuster.MythBuster import myth_router
+from auth.route import auth_router
 
 load_dotenv()
 
@@ -30,11 +29,10 @@ app.add_middleware(
 
 # Include routers
 app.include_router(medical_router, prefix="/api/f1", tags=["Medical Query"])
-app.include_router(symptom_router, prefix="/api/f2", tags=["Symptoms"])
+#app.include_router(symptom_router, prefix="/api/f2", tags=["Symptoms"])
 app.include_router(meal_generator, prefix="/api/f3", tags=["Meal Planning"])
 app.include_router(locationRouter, prefix="/api/f4", tags=["Location"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])
-app.include_router(myth_router, prefix="/api/f5", tags=["Myth"])
 
 @app.get("/", tags=["Root"])
 async def root():

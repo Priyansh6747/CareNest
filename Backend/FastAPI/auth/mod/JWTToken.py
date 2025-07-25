@@ -3,7 +3,7 @@ from jose import JWTError , jwt
 import os
 from dotenv import load_dotenv
 
-from FastAPI.auth.mod.models import TokenData
+from auth.mod.models import TokenData
 
 load_dotenv()
 secret_key = os.getenv('SECRET_KEY')

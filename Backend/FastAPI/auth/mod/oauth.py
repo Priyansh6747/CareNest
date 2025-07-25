@@ -1,5 +1,5 @@
 from fastapi import Depends, HTTPException, status
-from FastAPI.auth.mod.JWTToken import verify_access_token
+from auth.mod.JWTToken import verify_access_token
 from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
