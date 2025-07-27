@@ -84,7 +84,7 @@ class SymptomAnalyzer:
         """Initialize vector stores for medical and symptom databases"""
         try:
             # Load symptom database vector store (now primary)
-            symptom_db_path = "vectorstore/symptom_db_faiss"
+            symptom_db_path = "vectorstore/symptom_preg_db_faiss"
             if os.path.exists(f"{symptom_db_path}/index.faiss"):
                 logger.info("Loading symptom database vector store...")
                 self.symptom_vector_store = FAISS.load_local(
@@ -211,7 +211,7 @@ class SymptomAnalyzer:
             logger.error(f"Audio transcription failed: {e}")
             raise
 
-    async def analyze_symptoms(self, transcript: str, patient_age_group: str = "newborn") -> Dict[str, Any]:
+    async def analyze_symptoms(self, transcript: str, patient_age_group: str = "pregnent Women") -> Dict[str, Any]:
         """
         Analyze symptoms from transcript using structured prompt
 
